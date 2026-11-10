@@ -285,7 +285,7 @@ export default function DashboardClient() {
           <div className="mt-8 grid grid-cols-1 gap-5 sm:grid-cols-2 xl:grid-cols-4">
             {[
               ["Total Events", String(events.length), "Latest 50 stored events"],
-              ["Successful Actions", String(actions.filter((item) => item.status.toLowerCase() === "success").length), "Logged successful actions"],
+              ["Successful Actions", String(actions.filter((item) => item.status.toLowerCase() === "success" && ["bug_label_added", "slack_notification"].includes(item.action_type)).length), "Logged successful actions"],
               ["Failed Actions", String(actions.filter((item) => ["failed", "error"].includes(item.status.toLowerCase())).length), "Logged failed actions"],
               ["Connected Repos", String(repositories.length), "Saved in Supabase"],
             ].map(([title, value, description]) => (
@@ -300,109 +300,98 @@ export default function DashboardClient() {
             ))}
           </div>
 
-          <div className="mt-8 grid grid-cols-1 gap-6 xl:grid-cols-3">
-            <div className="rounded-xl border border-slate-800 bg-slate-900 p-6 xl:col-span-2">
-              <h3 className="text-lg font-semibold">
-                {activeTab === "Repositories"
-                  ? "Connected Repositories"
-                  : "Recent Activity"}
-              </h3>
+          {activeTab === "Repositories" && (
+            <div className="mt-8 rounded-xl border border-slate-800 bg-slate-900 p-6">
+              <h3 className="text-lg font-semibold">Connected Repositories</h3>
+              <div className="mt-5 space-y-3">
+                {repositories.length === 0 && <p className="text-sm text-slate-400">No repositories connected yet.</p>}
+                {repositories.map((repo) => (
+                  <div key={repo.id} className="rounded-lg border border-slate-800 p-4">
+                    <p className="font-medium">{repo.full_name}</p>
+                    <p className="mt-2 text-xs text-slate-400">Webhook: {repo.webhook_active ? "Active" : "Not configured"}</p>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
 
-              {activeTab === "Repositories" ? (
-                <div className="mt-6 space-y-4">
-                  {repositories.length === 0 && (
-                    <p className="text-sm text-slate-400">
-                      No repositories connected yet.
-                    </p>
-                  )}
-
-                  {repositories.map((repo) => (
-                    <div
-                      key={repo.id}
-                      className="rounded-lg border border-slate-800 p-4"
-                    >
-                      <p className="font-medium">{repo.full_name}</p>
-                      <p className="mt-2 text-xs text-slate-400">
-                        Webhook: {repo.webhook_active ? "Active" : "Not configured"}
-                      </p>
+          {activeTab === "Activity Logs" && (
+            <div className="mt-8 rounded-xl border border-slate-800 bg-slate-900 p-6">
+              <div className="flex items-center justify-between">
+                <h3 className="text-lg font-semibold">Activity Logs</h3>
+                <button onClick={loadDashboardData} className="rounded-lg bg-slate-800 px-3 py-2 text-sm hover:bg-slate-700">Refresh</button>
+              </div>
+              {dataLoading && <p className="mt-5 text-sm text-slate-400">Loading activity...</p>}
+              {!dataLoading && actions.length === 0 && <p className="mt-5 text-sm text-slate-400">No action logs yet.</p>}
+              <div className="mt-5 space-y-3">
+                {actions.map((action) => (
+                  <div key={action.id} className="rounded-lg border border-slate-800 p-4">
+                    <div className="flex flex-wrap justify-between gap-2">
+                      <p className="font-medium">{action.action_type.replaceAll("_", " ")}</p>
+                      <span className={action.status.toLowerCase() === "success" ? "text-sm text-green-400" : "text-sm text-red-400"}>{action.status}</span>
                     </div>
-                  ))}
+                    <p className="mt-2 text-sm text-slate-400">{action.message || "No details"}</p>
+                    <p className="mt-2 text-xs text-slate-500">{new Date(action.created_at).toLocaleString()}</p>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {activeTab === "Automation Rules" && (
+            <div className="mt-8 max-w-2xl rounded-xl border border-slate-800 bg-slate-900 p-6">
+              <h3 className="text-lg font-semibold">Active Automation Rules</h3>
+              <p className="mt-2 text-sm text-slate-400">These rules are currently handled by the GitHub webhook.</p>
+              <div className="mt-6 rounded-lg border border-slate-700 p-5">
+                <div className="flex items-center justify-between">
+                  <h4 className="font-semibold">Bug Detection</h4>
+                  <span className="rounded-full bg-green-950 px-3 py-1 text-xs text-green-400">Active</span>
                 </div>
-              ) : (
-                <div className="mt-6 space-y-5">
-                  {dataLoading && <p className="text-sm text-slate-400">Loading live activity…</p>}
+                <p className="mt-4 text-sm text-slate-400">WHEN a new GitHub issue is opened and its title contains:</p>
+                <p className="mt-2 rounded bg-slate-800 p-3 text-sm text-blue-400">bug</p>
+                <p className="mt-4 text-sm text-slate-400">THEN automatically:</p>
+                <ul className="mt-2 space-y-2 text-sm text-slate-200">
+                  <li>✓ Add the bug label to the GitHub issue</li>
+                  <li>✓ Send a notification to Slack</li>
+                  <li>✓ Record the event and actions in Supabase</li>
+                </ul>
+                <p className="mt-4 text-xs text-slate-500">Rule conditions are currently defined in the webhook code.</p>
+              </div>
+            </div>
+          )}
 
-                  {!dataLoading && events.length === 0 && (
-                    <p className="text-sm text-slate-400">
-                      No GitHub events stored yet. Push a commit or open an issue to test the webhook.
-                    </p>
-                  )}
-
-                  {events.map((event) => {
+          {activeTab === "Overview" && (
+            <div className="mt-8 grid grid-cols-1 gap-6 xl:grid-cols-3">
+              <div className="rounded-xl border border-slate-800 bg-slate-900 p-6 xl:col-span-2">
+                <div className="flex items-center justify-between">
+                  <h3 className="text-lg font-semibold">Recent GitHub Events</h3>
+                  <button onClick={loadDashboardData} className="rounded-lg bg-slate-800 px-3 py-2 text-sm hover:bg-slate-700">Refresh</button>
+                </div>
+                {dataLoading && <p className="mt-5 text-sm text-slate-400">Loading live activity...</p>}
+                {!dataLoading && events.length === 0 && <p className="mt-5 text-sm text-slate-400">No GitHub events stored yet.</p>}
+                <div className="mt-5 space-y-4">
+                  {events.slice(0, 10).map((event) => {
                     const repo = repositories.find((item) => item.id === event.repository_id);
-
                     return (
-                      <div key={event.id} className="border-b border-slate-800 pb-5">
+                      <div key={event.id} className="border-b border-slate-800 pb-4">
                         <p className="font-medium">{event.event_type}</p>
-                        <p className="mt-1 text-xs text-slate-400">
-                          {repo?.full_name ?? "Connected repository"} · {new Date(event.created_at).toLocaleString()}
-                        </p>
-                        <p className="mt-2 text-sm text-blue-400">
-                          Status: {event.processing_status}
-                        </p>
+                        <p className="mt-1 text-xs text-slate-400">{repo?.full_name ?? "Connected repository"} · {new Date(event.created_at).toLocaleString()}</p>
+                        <p className="mt-2 text-sm text-blue-400">Status: {event.processing_status}</p>
                       </div>
                     );
                   })}
-
-                  <div className="border-t border-slate-700 pt-5">
-                    <h4 className="font-semibold">Recent Action Logs</h4>
-
-                    {actions.length === 0 && (
-                      <p className="mt-3 text-sm text-slate-400">No actions logged yet.</p>
-                    )}
-
-                    {actions.slice(0, 10).map((action) => (
-                      <div key={action.id} className="mt-3 border-b border-slate-800 pb-3">
-                        <p className="text-sm font-medium">
-                          {action.action_type} · {action.status}
-                        </p>
-                        <p className="mt-1 text-xs text-slate-400">
-                          {action.message || "No details"} · {new Date(action.created_at).toLocaleString()}
-                        </p>
-                      </div>
-                    ))}
-                  </div>
                 </div>
-              )}
-            </div>
-
-            <div className="rounded-xl border border-slate-800 bg-slate-900 p-6">
-              <h3 className="text-lg font-semibold">Automation Rules</h3>
-              <p className="mt-1 text-sm text-slate-400">
-                Configure your bot behaviour.
-              </p>
-
-              <div className="mt-6 rounded-lg border border-slate-700 p-4">
-                <p className="font-medium">Bug Detection</p>
-                <p className="mt-4 text-sm text-slate-400">
-                  IF issue title contains:
-                </p>
-                <p className="mt-2 rounded bg-slate-800 p-2 text-sm text-blue-400">
-                  bug
-                </p>
-                <p className="mt-4 text-sm text-slate-400">
-                  THEN perform:
-                </p>
-                <ul className="mt-2 space-y-2 text-sm">
-                  <li>✓ Add bug label</li>
-                  <li>✓ Send Slack notification</li>
-                </ul>
-                <p className="mt-4 text-xs text-amber-400">
-                  Rule execution will be enabled in a later step.
-                </p>
+              </div>
+              <div className="rounded-xl border border-slate-800 bg-slate-900 p-6">
+                <h3 className="text-lg font-semibold">Automation Summary</h3>
+                <p className="mt-4 text-sm text-slate-400">Bug Detection</p>
+                <p className="mt-2 text-sm">Issue title contains <span className="text-blue-400">bug</span></p>
+                <p className="mt-4 text-sm text-green-400">✓ GitHub bug label</p>
+                <p className="mt-2 text-sm text-green-400">✓ Slack notification</p>
+                <p className="mt-4 text-xs text-slate-500">See Automation Rules for details.</p>
               </div>
             </div>
-          </div>
+          )}
 
           <footer className="mt-10 border-t border-slate-800 pt-5 text-xs text-slate-500">
             GitHub Automation Bot · Next.js, TypeScript and Supabase
