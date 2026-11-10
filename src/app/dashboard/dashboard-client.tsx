@@ -21,17 +21,23 @@ type ConnectedRepo = {
   webhook_active: boolean;
 };
 
-const initialEvents = [
-  {
-    id: 1,
-    type: "Issue opened",
-    repository: "GitHub repository",
-    title: "Waiting for real GitHub events",
-    action: "Webhook integration pending",
-    status: "Pending",
-    time: "—",
-  },
-];
+type DashboardEvent = {
+  id: number;
+  repository_id: number | null;
+  event_type: string;
+  payload: Record<string, unknown>;
+  processing_status: string;
+  created_at: string;
+};
+
+type DashboardAction = {
+  id: number;
+  event_id: number | null;
+  action_type: string;
+  status: string;
+  message: string | null;
+  created_at: string;
+};
 
 export default function DashboardClient() {
   const [activeTab, setActiveTab] = useState("Overview");
@@ -42,6 +48,9 @@ export default function DashboardClient() {
   const [savingId, setSavingId] = useState<number | null>(null);
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
+  const [events, setEvents] = useState<DashboardEvent[]>([]);
+  const [actions, setActions] = useState<DashboardAction[]>([]);
+  const [dataLoading, setDataLoading] = useState(true);
 
   const supabase = createClient();
 
@@ -59,8 +68,33 @@ export default function DashboardClient() {
     setRepositories(data ?? []);
   }
 
+  async function loadDashboardData() {
+    setDataLoading(true);
+
+    const [eventResult, actionResult] = await Promise.all([
+      supabase
+        .from("github_events")
+        .select("id, repository_id, event_type, payload, processing_status, created_at")
+        .order("created_at", { ascending: false })
+        .limit(50),
+      supabase
+        .from("action_logs")
+        .select("id, event_id, action_type, status, message, created_at")
+        .order("created_at", { ascending: false })
+        .limit(50),
+    ]);
+
+    if (eventResult.error) console.error("Event loading failed:", eventResult.error.message);
+    if (actionResult.error) console.error("Action loading failed:", actionResult.error.message);
+
+    setEvents((eventResult.data ?? []) as DashboardEvent[]);
+    setActions((actionResult.data ?? []) as DashboardAction[]);
+    setDataLoading(false);
+  }
+
   useEffect(() => {
     loadConnectedRepos();
+    loadDashboardData();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -250,9 +284,9 @@ export default function DashboardClient() {
 
           <div className="mt-8 grid grid-cols-1 gap-5 sm:grid-cols-2 xl:grid-cols-4">
             {[
-              ["Total Events", "0", "Waiting for webhooks"],
-              ["Successful Actions", "0", "Bot executions"],
-              ["Failed Actions", "0", "Requires attention"],
+              ["Total Events", String(events.length), "Latest 50 stored events"],
+              ["Successful Actions", String(actions.filter((item) => item.status.toLowerCase() === "success").length), "Logged successful actions"],
+              ["Failed Actions", String(actions.filter((item) => ["failed", "error"].includes(item.status.toLowerCase())).length), "Logged failed actions"],
               ["Connected Repos", String(repositories.length), "Saved in Supabase"],
             ].map(([title, value, description]) => (
               <div
@@ -295,27 +329,50 @@ export default function DashboardClient() {
                   ))}
                 </div>
               ) : (
-                <>
-                  <p className="mt-1 text-sm text-slate-400">
-                    Real GitHub events will appear here after webhook setup.
-                  </p>
-                  <div className="mt-6 space-y-5">
-                    {initialEvents.map((event) => (
-                      <div
-                        key={event.id}
-                        className="border-b border-slate-800 pb-5"
-                      >
-                        <p className="font-medium">{event.title}</p>
+                <div className="mt-6 space-y-5">
+                  {dataLoading && <p className="text-sm text-slate-400">Loading live activity…</p>}
+
+                  {!dataLoading && events.length === 0 && (
+                    <p className="text-sm text-slate-400">
+                      No GitHub events stored yet. Push a commit or open an issue to test the webhook.
+                    </p>
+                  )}
+
+                  {events.map((event) => {
+                    const repo = repositories.find((item) => item.id === event.repository_id);
+
+                    return (
+                      <div key={event.id} className="border-b border-slate-800 pb-5">
+                        <p className="font-medium">{event.event_type}</p>
                         <p className="mt-1 text-xs text-slate-400">
-                          {event.repository} · {event.type}
+                          {repo?.full_name ?? "Connected repository"} · {new Date(event.created_at).toLocaleString()}
                         </p>
                         <p className="mt-2 text-sm text-blue-400">
-                          {event.action}
+                          Status: {event.processing_status}
+                        </p>
+                      </div>
+                    );
+                  })}
+
+                  <div className="border-t border-slate-700 pt-5">
+                    <h4 className="font-semibold">Recent Action Logs</h4>
+
+                    {actions.length === 0 && (
+                      <p className="mt-3 text-sm text-slate-400">No actions logged yet.</p>
+                    )}
+
+                    {actions.slice(0, 10).map((action) => (
+                      <div key={action.id} className="mt-3 border-b border-slate-800 pb-3">
+                        <p className="text-sm font-medium">
+                          {action.action_type} · {action.status}
+                        </p>
+                        <p className="mt-1 text-xs text-slate-400">
+                          {action.message || "No details"} · {new Date(action.created_at).toLocaleString()}
                         </p>
                       </div>
                     ))}
                   </div>
-                </>
+                </div>
               )}
             </div>
 
