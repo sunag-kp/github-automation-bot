@@ -126,6 +126,12 @@ export default function DashboardClient() {
         throw new Error("Your login session has expired. Please sign in again.");
       }
 
+      const { data: { session }, error: sessionError } = await supabase.auth.getSession();
+
+      if (sessionError || !session?.provider_token) {
+        throw new Error("GitHub access token is unavailable. Please sign out and sign in again.");
+      }
+
       const { data: existing, error: lookupError } = await supabase
         .from("repositories")
         .select("id")
@@ -137,12 +143,14 @@ export default function DashboardClient() {
         throw new Error(lookupError.message);
       }
 
+
       if (existing) {
         const { error: updateError } = await supabase
           .from("repositories")
           .update({
             name: repo.name,
             full_name: repo.full_name,
+            github_access_token: session.provider_token,
           })
           .eq("id", existing.id);
 
@@ -155,7 +163,8 @@ export default function DashboardClient() {
             github_repo_id: repo.id,
             name: repo.name,
             full_name: repo.full_name,
-            webhook_active: false,
+            webhook_active: true,
+            github_access_token: session.provider_token,
           });
 
         if (insertError) throw new Error(insertError.message);
@@ -401,14 +410,14 @@ export default function DashboardClient() {
                     </div>
 
                     <button
-                      disabled={alreadyConnected || savingId === repo.id}
+                      disabled={savingId === repo.id}
                       onClick={() => connectRepository(repo)}
                       className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium hover:bg-blue-500 disabled:cursor-not-allowed disabled:bg-slate-700"
                     >
-                      {alreadyConnected
-                        ? "Connected"
-                        : savingId === repo.id
-                          ? "Saving..."
+                      {savingId === repo.id
+                        ? "Saving..."
+                        : alreadyConnected
+                          ? "Refresh Access"
                           : "Connect"}
                     </button>
                   </div>
