@@ -1,36 +1,66 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
-Test change
-## Getting Started
+# GitHub Automation Bot
 
-First, run the development server:
+An event-driven GitHub automation platform built with Next.js, TypeScript, Supabase and Slack.
+
+Automatically detects newly opened bug-related issues, applies GitHub labels, sends Slack notifications and maintains an activity dashboard.
+
+## Features
+
+- GitHub OAuth authentication
+- Connect GitHub repositories
+- GitHub webhooks for Issues and Push events
+- HMAC SHA-256 webhook signature validation
+- Duplicate webhook delivery detection
+- Supabase event and action persistence
+- Automatic bug label creation and assignment
+- Slack notifications for detected bugs
+- Dashboard with event metrics and recent activity
+- Vercel deployment
+
+## Architecture
+
+GitHub Repository
+       |
+       v
+GitHub Webhook
+       |
+       v
+Next.js API Route
+       |
+       +---- Signature Validation
+       |
+       +---- Supabase Event Storage
+       |
+       +---- Bug Detection
+       |         |
+       |         +---- GitHub API: Add bug label
+       |         |
+       |         +---- Slack: Send notification
+       |
+       v
+Supabase Action Logs
+       |
+       v
+Next.js Dashboard
+
+## Technology Stack
+
+- Next.js
+- React
+- TypeScript
+- Tailwind CSS
+- Supabase Authentication
+- Supabase PostgreSQL
+- GitHub REST API
+- GitHub Webhooks
+- Slack Incoming Webhooks
+- Vercel
+
+## Local Setup
+
+Clone the repository:
 
 ```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
-```
-
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
-
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
-
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
-
-## Learn More
-
-To learn more about Next.js, take a look at the following resources:
-
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
-
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
-
-## Deploy on Vercel
-
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+git clone https://github.com/sunag-kp/github-automation-bot.git
+cd github-automation-bot
+npm install
