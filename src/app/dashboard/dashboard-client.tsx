@@ -1,7 +1,7 @@
-
 "use client";
 
 import { useEffect, useState } from "react";
+import { useRouter } from "next/navigation";
 import { createClient } from "@/lib/supabase/client";
 
 type GitHubRepo = {
@@ -39,19 +39,43 @@ type DashboardAction = {
   created_at: string;
 };
 
+type AutomationRule = {
+  id: number;
+  user_id: string;
+  repository_id: number | null;
+  name: string;
+  keyword: string;
+  action_label: string;
+  notify_slack: boolean;
+  enabled: boolean;
+  created_at: string;
+};
+
 export default function DashboardClient() {
   const [activeTab, setActiveTab] = useState("Overview");
   const [repositories, setRepositories] = useState<ConnectedRepo[]>([]);
   const [githubRepos, setGithubRepos] = useState<GitHubRepo[]>([]);
   const [showModal, setShowModal] = useState(false);
+  const [showRuleModal, setShowRuleModal] = useState(false);
   const [loading, setLoading] = useState(false);
   const [savingId, setSavingId] = useState<number | null>(null);
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
   const [events, setEvents] = useState<DashboardEvent[]>([]);
   const [actions, setActions] = useState<DashboardAction[]>([]);
+  const [rules, setRules] = useState<AutomationRule[]>([]);
   const [dataLoading, setDataLoading] = useState(true);
 
+  // New rule form state
+  const [ruleName, setRuleName] = useState("");
+  const [ruleKeyword, setRuleKeyword] = useState("");
+  const [ruleLabel, setRuleLabel] = useState("bug");
+  const [ruleSlack, setRuleSlack] = useState(true);
+  const [ruleRepoId, setRuleRepoId] = useState<string>("all");
+  const [ruleSaving, setRuleSaving] = useState(false);
+  const [ruleError, setRuleError] = useState("");
+
+  const router = useRouter();
   const supabase = createClient();
 
   async function loadConnectedRepos() {
@@ -69,9 +93,7 @@ export default function DashboardClient() {
   }
 
   async function loadDashboardData() {
-    setDataLoading(true);
-
-    const [eventResult, actionResult] = await Promise.all([
+    const [eventResult, actionResult, ruleResult] = await Promise.all([
       supabase
         .from("github_events")
         .select("id, repository_id, event_type, payload, processing_status, created_at")
@@ -82,19 +104,32 @@ export default function DashboardClient() {
         .select("id, event_id, action_type, status, message, created_at")
         .order("created_at", { ascending: false })
         .limit(50),
+      supabase
+        .from("automation_rules")
+        .select("id, user_id, repository_id, name, keyword, action_label, notify_slack, enabled, created_at")
+        .order("created_at", { ascending: true }),
     ]);
 
     if (eventResult.error) console.error("Event loading failed:", eventResult.error.message);
     if (actionResult.error) console.error("Action loading failed:", actionResult.error.message);
+    if (ruleResult.error) console.error("Rule loading failed:", ruleResult.error.message);
 
     setEvents((eventResult.data ?? []) as DashboardEvent[]);
     setActions((actionResult.data ?? []) as DashboardAction[]);
+    setRules((ruleResult.data ?? []) as AutomationRule[]);
     setDataLoading(false);
   }
 
   useEffect(() => {
-    loadConnectedRepos();
-    loadDashboardData();
+    let isMounted = true;
+    const fetchInitial = async () => {
+      await Promise.all([loadConnectedRepos(), loadDashboardData()]);
+      if (!isMounted) return;
+    };
+    void fetchInitial();
+    return () => {
+      isMounted = false;
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -177,7 +212,6 @@ export default function DashboardClient() {
         throw new Error(lookupError.message);
       }
 
-
       if (existing) {
         const { error: updateError } = await supabase
           .from("repositories")
@@ -215,10 +249,98 @@ export default function DashboardClient() {
     }
   }
 
+  async function toggleRule(rule: AutomationRule) {
+    const { error: updateError } = await supabase
+      .from("automation_rules")
+      .update({ enabled: !rule.enabled })
+      .eq("id", rule.id);
+
+    if (updateError) {
+      console.error("Failed to toggle rule:", updateError.message);
+      return;
+    }
+
+    setRules((prev) =>
+      prev.map((r) => (r.id === rule.id ? { ...r, enabled: !r.enabled } : r))
+    );
+  }
+
+  async function deleteRule(id: number) {
+    const { error: deleteError } = await supabase
+      .from("automation_rules")
+      .delete()
+      .eq("id", id);
+
+    if (deleteError) {
+      console.error("Failed to delete rule:", deleteError.message);
+      return;
+    }
+
+    setRules((prev) => prev.filter((r) => r.id !== id));
+  }
+
+  async function createRule(e: React.FormEvent) {
+    e.preventDefault();
+    setRuleSaving(true);
+    setRuleError("");
+
+    try {
+      const {
+        data: { user },
+        error: userError,
+      } = await supabase.auth.getUser();
+
+      if (userError || !user) {
+        throw new Error("Login session expired. Please refresh.");
+      }
+
+      if (!ruleName.trim() || !ruleKeyword.trim()) {
+        throw new Error("Rule name and keyword are required.");
+      }
+
+      const repoId = ruleRepoId === "all" ? null : parseInt(ruleRepoId, 10);
+
+      const { data: newRule, error: insertError } = await supabase
+        .from("automation_rules")
+        .insert({
+          user_id: user.id,
+          repository_id: repoId,
+          name: ruleName.trim(),
+          keyword: ruleKeyword.trim(),
+          action_label: ruleLabel.trim() || "bug",
+          notify_slack: ruleSlack,
+          enabled: true,
+        })
+        .select()
+        .single();
+
+      if (insertError) {
+        throw new Error(insertError.message);
+      }
+
+      if (newRule) {
+        setRules((prev) => [...prev, newRule as AutomationRule]);
+      }
+
+      setShowRuleModal(false);
+      setRuleName("");
+      setRuleKeyword("");
+      setRuleLabel("bug");
+      setRuleSlack(true);
+      setRuleRepoId("all");
+    } catch (err) {
+      setRuleError(err instanceof Error ? err.message : "Failed to create rule");
+    } finally {
+      setRuleSaving(false);
+    }
+  }
+
   async function signOut() {
     await supabase.auth.signOut();
-    window.location.href = "/login";
+    router.push("/login");
   }
+
+  const activeRulesCount = rules.filter((r) => r.enabled).length;
 
   return (
     <main className="min-h-screen bg-slate-950 text-slate-100">
@@ -269,12 +391,22 @@ export default function DashboardClient() {
               </p>
             </div>
 
-            <button
-              onClick={openRepositorySelector}
-              className="rounded-lg bg-blue-600 px-5 py-3 text-sm font-medium hover:bg-blue-500"
-            >
-              + Connect Repository
-            </button>
+            <div className="flex items-center gap-3">
+              {activeTab === "Automation Rules" && (
+                <button
+                  onClick={() => setShowRuleModal(true)}
+                  className="rounded-lg bg-green-600 px-4 py-2.5 text-sm font-medium hover:bg-green-500"
+                >
+                  + Add Automation Rule
+                </button>
+              )}
+              <button
+                onClick={openRepositorySelector}
+                className="rounded-lg bg-blue-600 px-5 py-2.5 text-sm font-medium hover:bg-blue-500"
+              >
+                + Connect Repository
+              </button>
+            </div>
           </header>
 
           <div className="mt-8 rounded-lg border border-blue-900 bg-blue-950/40 p-4 text-sm text-blue-200">
@@ -284,10 +416,28 @@ export default function DashboardClient() {
 
           <div className="mt-8 grid grid-cols-1 gap-5 sm:grid-cols-2 xl:grid-cols-4">
             {[
-              ["Total Events", String(events.length), "Latest 50 stored events"],
-              ["Successful Actions", String(actions.filter((item) => item.status.toLowerCase() === "success" && ["bug_label_added", "slack_notification"].includes(item.action_type)).length), "Logged successful actions"],
-              ["Failed Actions", String(actions.filter((item) => ["failed", "error"].includes(item.status.toLowerCase())).length), "Logged failed actions"],
-              ["Connected Repos", String(repositories.length), "Saved in Supabase"],
+              ["Total Events", String(events.length), "Latest stored webhook events"],
+              [
+                "Successful Actions",
+                String(
+                  actions.filter(
+                    (item) =>
+                      item.status.toLowerCase() === "success" &&
+                      item.action_type !== "event_recorded"
+                  ).length
+                ),
+                "Logged successful actions",
+              ],
+              [
+                "Failed Actions",
+                String(
+                  actions.filter((item) =>
+                    ["failed", "error"].includes(item.status.toLowerCase())
+                  ).length
+                ),
+                "Logged failed actions",
+              ],
+              ["Active Rules", String(activeRulesCount), "Configured automation rules"],
             ].map(([title, value, description]) => (
               <div
                 key={title}
@@ -304,11 +454,15 @@ export default function DashboardClient() {
             <div className="mt-8 rounded-xl border border-slate-800 bg-slate-900 p-6">
               <h3 className="text-lg font-semibold">Connected Repositories</h3>
               <div className="mt-5 space-y-3">
-                {repositories.length === 0 && <p className="text-sm text-slate-400">No repositories connected yet.</p>}
+                {repositories.length === 0 && (
+                  <p className="text-sm text-slate-400">No repositories connected yet.</p>
+                )}
                 {repositories.map((repo) => (
                   <div key={repo.id} className="rounded-lg border border-slate-800 p-4">
                     <p className="font-medium">{repo.full_name}</p>
-                    <p className="mt-2 text-xs text-slate-400">Webhook: {repo.webhook_active ? "Active" : "Not configured"}</p>
+                    <p className="mt-2 text-xs text-slate-400">
+                      Webhook: {repo.webhook_active ? "Active" : "Not configured"}
+                    </p>
                   </div>
                 ))}
               </div>
@@ -319,19 +473,36 @@ export default function DashboardClient() {
             <div className="mt-8 rounded-xl border border-slate-800 bg-slate-900 p-6">
               <div className="flex items-center justify-between">
                 <h3 className="text-lg font-semibold">Activity Logs</h3>
-                <button onClick={loadDashboardData} className="rounded-lg bg-slate-800 px-3 py-2 text-sm hover:bg-slate-700">Refresh</button>
+                <button
+                  onClick={loadDashboardData}
+                  className="rounded-lg bg-slate-800 px-3 py-2 text-sm hover:bg-slate-700"
+                >
+                  Refresh
+                </button>
               </div>
               {dataLoading && <p className="mt-5 text-sm text-slate-400">Loading activity...</p>}
-              {!dataLoading && actions.length === 0 && <p className="mt-5 text-sm text-slate-400">No action logs yet.</p>}
+              {!dataLoading && actions.length === 0 && (
+                <p className="mt-5 text-sm text-slate-400">No action logs yet.</p>
+              )}
               <div className="mt-5 space-y-3">
                 {actions.map((action) => (
                   <div key={action.id} className="rounded-lg border border-slate-800 p-4">
                     <div className="flex flex-wrap justify-between gap-2">
                       <p className="font-medium">{action.action_type.replaceAll("_", " ")}</p>
-                      <span className={action.status.toLowerCase() === "success" ? "text-sm text-green-400" : "text-sm text-red-400"}>{action.status}</span>
+                      <span
+                        className={
+                          action.status.toLowerCase() === "success"
+                            ? "text-sm text-green-400"
+                            : "text-sm text-red-400"
+                        }
+                      >
+                        {action.status}
+                      </span>
                     </div>
                     <p className="mt-2 text-sm text-slate-400">{action.message || "No details"}</p>
-                    <p className="mt-2 text-xs text-slate-500">{new Date(action.created_at).toLocaleString()}</p>
+                    <p className="mt-2 text-xs text-slate-500">
+                      {new Date(action.created_at).toLocaleString()}
+                    </p>
                   </div>
                 ))}
               </div>
@@ -339,23 +510,102 @@ export default function DashboardClient() {
           )}
 
           {activeTab === "Automation Rules" && (
-            <div className="mt-8 max-w-2xl rounded-xl border border-slate-800 bg-slate-900 p-6">
-              <h3 className="text-lg font-semibold">Active Automation Rules</h3>
-              <p className="mt-2 text-sm text-slate-400">These rules are currently handled by the GitHub webhook.</p>
-              <div className="mt-6 rounded-lg border border-slate-700 p-5">
-                <div className="flex items-center justify-between">
-                  <h4 className="font-semibold">Bug Detection</h4>
-                  <span className="rounded-full bg-green-950 px-3 py-1 text-xs text-green-400">Active</span>
+            <div className="mt-8 space-y-6">
+              <div className="flex flex-wrap items-center justify-between gap-4">
+                <div>
+                  <h3 className="text-lg font-semibold">Configured Automation Rules</h3>
+                  <p className="mt-1 text-sm text-slate-400">
+                    Rules evaluated dynamically when GitHub webhooks arrive.
+                  </p>
                 </div>
-                <p className="mt-4 text-sm text-slate-400">WHEN a new GitHub issue is opened and its title contains:</p>
-                <p className="mt-2 rounded bg-slate-800 p-3 text-sm text-blue-400">bug</p>
-                <p className="mt-4 text-sm text-slate-400">THEN automatically:</p>
-                <ul className="mt-2 space-y-2 text-sm text-slate-200">
-                  <li>✓ Add the bug label to the GitHub issue</li>
-                  <li>✓ Send a notification to Slack</li>
-                  <li>✓ Record the event and actions in Supabase</li>
-                </ul>
-                <p className="mt-4 text-xs text-slate-500">Rule conditions are currently defined in the webhook code.</p>
+                <button
+                  onClick={() => setShowRuleModal(true)}
+                  className="rounded-lg bg-green-600 px-4 py-2 text-sm font-medium hover:bg-green-500"
+                >
+                  + Create Rule
+                </button>
+              </div>
+
+              {rules.length === 0 && (
+                <div className="rounded-xl border border-slate-800 bg-slate-900 p-6">
+                  <p className="text-sm text-slate-400">
+                    No custom rules in database. The system is operating on the default rule:
+                  </p>
+                  <div className="mt-4 rounded-lg border border-slate-700 p-4">
+                    <div className="flex items-center justify-between">
+                      <span className="font-medium text-white">Default Bug Detection</span>
+                      <span className="rounded-full bg-green-950 px-2.5 py-0.5 text-xs text-green-400">
+                        Default
+                      </span>
+                    </div>
+                    <p className="mt-2 text-xs text-slate-400">
+                      Trigger: Issue title contains &quot;bug&quot; → Add &apos;bug&apos; label &amp; Send Slack alert
+                    </p>
+                  </div>
+                </div>
+              )}
+
+              <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+                {rules.map((rule) => {
+                  const targetRepo = repositories.find((r) => r.id === rule.repository_id);
+                  return (
+                    <div
+                      key={rule.id}
+                      className="rounded-xl border border-slate-800 bg-slate-900 p-5 transition hover:border-slate-700"
+                    >
+                      <div className="flex items-start justify-between gap-2">
+                        <div>
+                          <h4 className="font-semibold text-white">{rule.name}</h4>
+                          <p className="mt-1 text-xs text-slate-400">
+                            Scope: {targetRepo ? targetRepo.full_name : "All Repositories"}
+                          </p>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <button
+                            onClick={() => toggleRule(rule)}
+                            className={`rounded-full px-3 py-1 text-xs font-medium transition ${
+                              rule.enabled
+                                ? "bg-green-950 text-green-400 hover:bg-green-900"
+                                : "bg-slate-800 text-slate-400 hover:bg-slate-700"
+                            }`}
+                          >
+                            {rule.enabled ? "Enabled" : "Disabled"}
+                          </button>
+                          <button
+                            onClick={() => deleteRule(rule.id)}
+                            className="rounded p-1 text-xs text-slate-500 hover:text-red-400"
+                            title="Delete rule"
+                          >
+                            ✕
+                          </button>
+                        </div>
+                      </div>
+
+                      <div className="mt-4 space-y-2 text-sm text-slate-300">
+                        <div className="flex items-center gap-2">
+                          <span className="text-xs text-slate-500">Keyword:</span>
+                          <span className="rounded bg-slate-800 px-2 py-0.5 font-mono text-xs text-blue-400">
+                            {rule.keyword}
+                          </span>
+                        </div>
+
+                        <div className="flex items-center gap-2">
+                          <span className="text-xs text-slate-500">Action:</span>
+                          <span className="rounded bg-slate-800 px-2 py-0.5 text-xs text-emerald-400">
+                            Add label &apos;{rule.action_label}&apos;
+                          </span>
+                        </div>
+
+                        <div className="flex items-center gap-2">
+                          <span className="text-xs text-slate-500">Slack:</span>
+                          <span className="text-xs text-slate-300">
+                            {rule.notify_slack ? "✓ Alert channel" : "Disabled"}
+                          </span>
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
               </div>
             </div>
           )}
@@ -365,30 +615,69 @@ export default function DashboardClient() {
               <div className="rounded-xl border border-slate-800 bg-slate-900 p-6 xl:col-span-2">
                 <div className="flex items-center justify-between">
                   <h3 className="text-lg font-semibold">Recent GitHub Events</h3>
-                  <button onClick={loadDashboardData} className="rounded-lg bg-slate-800 px-3 py-2 text-sm hover:bg-slate-700">Refresh</button>
+                  <button
+                    onClick={loadDashboardData}
+                    className="rounded-lg bg-slate-800 px-3 py-2 text-sm hover:bg-slate-700"
+                  >
+                    Refresh
+                  </button>
                 </div>
                 {dataLoading && <p className="mt-5 text-sm text-slate-400">Loading live activity...</p>}
-                {!dataLoading && events.length === 0 && <p className="mt-5 text-sm text-slate-400">No GitHub events stored yet.</p>}
+                {!dataLoading && events.length === 0 && (
+                  <p className="mt-5 text-sm text-slate-400">No GitHub events stored yet.</p>
+                )}
                 <div className="mt-5 space-y-4">
                   {events.slice(0, 10).map((event) => {
                     const repo = repositories.find((item) => item.id === event.repository_id);
                     return (
                       <div key={event.id} className="border-b border-slate-800 pb-4">
                         <p className="font-medium">{event.event_type}</p>
-                        <p className="mt-1 text-xs text-slate-400">{repo?.full_name ?? "Connected repository"} · {new Date(event.created_at).toLocaleString()}</p>
-                        <p className="mt-2 text-sm text-blue-400">Status: {event.processing_status}</p>
+                        <p className="mt-1 text-xs text-slate-400">
+                          {repo?.full_name ?? "Connected repository"} ·{" "}
+                          {new Date(event.created_at).toLocaleString()}
+                        </p>
+                        <p className="mt-2 text-sm text-blue-400">
+                          Status: {event.processing_status}
+                        </p>
                       </div>
                     );
                   })}
                 </div>
               </div>
+
               <div className="rounded-xl border border-slate-800 bg-slate-900 p-6">
-                <h3 className="text-lg font-semibold">Automation Summary</h3>
-                <p className="mt-4 text-sm text-slate-400">Bug Detection</p>
-                <p className="mt-2 text-sm">Issue title contains <span className="text-blue-400">bug</span></p>
-                <p className="mt-4 text-sm text-green-400">✓ GitHub bug label</p>
-                <p className="mt-2 text-sm text-green-400">✓ Slack notification</p>
-                <p className="mt-4 text-xs text-slate-500">See Automation Rules for details.</p>
+                <h3 className="text-lg font-semibold">Automation Engine</h3>
+                <p className="mt-3 text-sm text-slate-400">Active Rules: {activeRulesCount}</p>
+                <div className="mt-4 space-y-3">
+                  {rules.slice(0, 3).map((r) => (
+                    <div key={r.id} className="rounded-lg border border-slate-800 p-3 text-xs">
+                      <div className="flex items-center justify-between">
+                        <span className="font-medium text-white">{r.name}</span>
+                        <span
+                          className={`rounded px-1.5 py-0.5 ${
+                            r.enabled ? "bg-green-950 text-green-400" : "bg-slate-800 text-slate-500"
+                          }`}
+                        >
+                          {r.enabled ? "Active" : "Off"}
+                        </span>
+                      </div>
+                      <p className="mt-1 text-slate-400">
+                        Matches: &quot;{r.keyword}&quot; → label &apos;{r.action_label}&apos;
+                      </p>
+                    </div>
+                  ))}
+                  {rules.length === 0 && (
+                    <div className="rounded-lg border border-slate-800 p-3 text-xs text-slate-400">
+                      Default Bug Detection is active.
+                    </div>
+                  )}
+                </div>
+                <button
+                  onClick={() => setActiveTab("Automation Rules")}
+                  className="mt-4 w-full rounded-lg bg-slate-800 py-2 text-center text-xs text-blue-400 hover:bg-slate-700"
+                >
+                  Manage Rules →
+                </button>
               </div>
             </div>
           )}
@@ -399,6 +688,7 @@ export default function DashboardClient() {
         </section>
       </div>
 
+      {/* Connect Repository Modal */}
       {showModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4">
           <div className="max-h-[85vh] w-full max-w-2xl overflow-y-auto rounded-xl border border-slate-700 bg-slate-900 p-6">
@@ -476,6 +766,119 @@ export default function DashboardClient() {
                 No repositories were returned by GitHub.
               </p>
             )}
+          </div>
+        </div>
+      )}
+
+      {/* Create Automation Rule Modal */}
+      {showRuleModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4">
+          <div className="w-full max-w-lg rounded-xl border border-slate-700 bg-slate-900 p-6">
+            <div className="flex items-center justify-between">
+              <h2 className="text-xl font-bold">New Automation Rule</h2>
+              <button
+                onClick={() => setShowRuleModal(false)}
+                className="text-slate-400 hover:text-white"
+              >
+                ✕
+              </button>
+            </div>
+
+            <p className="mt-2 text-sm text-slate-400">
+              Define a trigger keyword to automatically label issues and send Slack alerts.
+            </p>
+
+            {ruleError && (
+              <p className="mt-4 rounded-lg border border-red-900 bg-red-950/40 p-3 text-xs text-red-300">
+                {ruleError}
+              </p>
+            )}
+
+            <form onSubmit={createRule} className="mt-5 space-y-4">
+              <div>
+                <label className="block text-xs font-medium text-slate-300">Rule Name</label>
+                <input
+                  type="text"
+                  required
+                  placeholder="e.g. Bug Detection or Urgent Alert"
+                  value={ruleName}
+                  onChange={(e) => setRuleName(e.target.value)}
+                  className="mt-1 w-full rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 text-sm text-white focus:border-blue-500 focus:outline-none"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-medium text-slate-300">Trigger Keyword</label>
+                <input
+                  type="text"
+                  required
+                  placeholder="e.g. bug, urgent, security, help"
+                  value={ruleKeyword}
+                  onChange={(e) => setRuleKeyword(e.target.value)}
+                  className="mt-1 w-full rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 text-sm text-white focus:border-blue-500 focus:outline-none"
+                />
+                <p className="mt-1 text-xs text-slate-500">
+                  Matches when an opened issue title contains this word.
+                </p>
+              </div>
+
+              <div>
+                <label className="block text-xs font-medium text-slate-300">GitHub Label to Apply</label>
+                <input
+                  type="text"
+                  placeholder="e.g. bug, urgent, triage"
+                  value={ruleLabel}
+                  onChange={(e) => setRuleLabel(e.target.value)}
+                  className="mt-1 w-full rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 text-sm text-white focus:border-blue-500 focus:outline-none"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-medium text-slate-300">Target Repository</label>
+                <select
+                  value={ruleRepoId}
+                  onChange={(e) => setRuleRepoId(e.target.value)}
+                  className="mt-1 w-full rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 text-sm text-white focus:border-blue-500 focus:outline-none"
+                >
+                  <option value="all">All Connected Repositories</option>
+                  {repositories.map((r) => (
+                    <option key={r.id} value={String(r.id)}>
+                      {r.full_name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div className="flex items-center gap-2 pt-2">
+                <input
+                  type="checkbox"
+                  id="notifySlackCheck"
+                  checked={ruleSlack}
+                  onChange={(e) => setRuleSlack(e.target.checked)}
+                  className="h-4 w-4 rounded border-slate-700 bg-slate-800 text-blue-600 focus:ring-0"
+                />
+                <label htmlFor="notifySlackCheck" className="text-xs text-slate-300">
+                  Send notification to Slack channel
+                </label>
+              </div>
+
+              <div className="flex justify-end gap-3 pt-4">
+                <button
+                  type="button"
+                  onClick={() => setShowRuleModal(false)}
+                  className="rounded-lg bg-slate-800 px-4 py-2 text-sm text-slate-300 hover:bg-slate-700"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={ruleSaving}
+                  className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium hover:bg-blue-500 disabled:bg-slate-700"
+                >
+                  {ruleSaving ? "Saving..." : "Create Rule"}
+                </button>
+              </div>
+            </form>
           </div>
         </div>
       )}

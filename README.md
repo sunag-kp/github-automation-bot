@@ -17,6 +17,9 @@ https://github-automation-bot-one.vercel.app
 - Duplicate delivery detection using GitHub delivery IDs.
 - Supabase persistence for GitHub events and action logs.
 - Automatic bug label creation and assignment for matching issues.
+- Configurable automation rules with dashboard management and dynamic Supabase evaluation.
+- Durable retry mechanism with backoff for downstream GitHub and Slack API requests.
+- Granular action logging tracking both successful and failed external service operations.
 - Slack Incoming Webhook notifications.
 - Authenticated dashboard with event metrics, activity and action logs.
 - Vercel deployment.
@@ -132,10 +135,10 @@ The application is deployed on Vercel.
 
 ## Current scope and limitations
 
-- The bug-detection condition is defined in webhook code rather than configured dynamically through the UI.
-- The current automation is an MVP; durable retry scheduling and recovery from downstream service failures require further hardening.
-- GitHub OAuth is used instead of GitHub App installation authentication.
-- Duplicate delivery detection is implemented using delivery IDs; it should not be confused with a complete distributed retry mechanism.
+- Automation rules are dynamically evaluated from Supabase with user configuration in the dashboard, falling back to default bug detection if no custom rules exist.
+- Downstream service requests (GitHub and Slack) feature bounded retries with backoff, with failures logged directly to the database audit trail.
+- GitHub OAuth is used for user authentication and repository access; future iterations could migrate to GitHub App installation tokens.
+- Duplicate delivery protection is enforced via webhook delivery ID constraints.
 
 ## Repository
 

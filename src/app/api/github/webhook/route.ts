@@ -17,8 +17,30 @@ function verifySignature(body: string, signature: string | null, secret: string)
     timingSafeEqual(received, expected);
 }
 
+async function fetchWithRetry(
+  url: string,
+  options: RequestInit,
+  retries = 2,
+  delayMs = 500
+): Promise<Response> {
+  try {
+    const res = await fetch(url, options);
+    if (!res.ok && res.status >= 500 && retries > 0) {
+      await new Promise((r) => setTimeout(r, delayMs));
+      return fetchWithRetry(url, options, retries - 1, delayMs * 2);
+    }
+    return res;
+  } catch (err) {
+    if (retries > 0) {
+      await new Promise((r) => setTimeout(r, delayMs));
+      return fetchWithRetry(url, options, retries - 1, delayMs * 2);
+    }
+    throw err;
+  }
+}
+
 async function githubRequest(url: string, token: string, method = "GET", body?: unknown) {
-  return fetch(url, {
+  return fetchWithRetry(url, {
     method,
     headers: {
       Authorization: `Bearer ${token}`,
@@ -29,6 +51,31 @@ async function githubRequest(url: string, token: string, method = "GET", body?: 
     body: body ? JSON.stringify(body) : undefined,
     cache: "no-store",
   });
+}
+
+type RuleRecord = {
+  id?: number;
+  name: string;
+  keyword: string;
+  action_label?: string | null;
+  notify_slack?: boolean | null;
+  enabled?: boolean | null;
+};
+
+interface WebhookPayload {
+  action?: string;
+  repository?: {
+    id: number;
+    name: string;
+    full_name: string;
+    owner?: { login: string };
+  };
+  issue?: {
+    number: number;
+    title?: string;
+    html_url?: string;
+  };
+  [key: string]: unknown;
 }
 
 export async function POST(request: NextRequest) {
@@ -53,7 +100,7 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: "Missing GitHub delivery headers" }, { status: 400 });
   }
 
-  let payload: any;
+  let payload: WebhookPayload;
   try {
     payload = JSON.parse(body);
   } catch {
@@ -84,6 +131,7 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ message: "Repository not connected" }, { status: 202 });
   }
 
+  // Idempotent delivery check: insert event with unique delivery_id constraint
   const { data: event, error: insertError } = await supabase
     .from("github_events")
     .insert({
@@ -105,106 +153,201 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: "Event storage failed" }, { status: 500 });
   }
 
-  let actionType = "event_recorded";
-  let actionStatus = "success";
-  let actionMessage = `${eventType} received from ${repository.full_name}`;
+  let overallActionType = "event_recorded";
+  let overallStatus = "success";
+  let overallMessage = `${eventType} received from ${repository.full_name}`;
 
   try {
     if (
       eventType === "issues" &&
       payload.action === "opened" &&
-      typeof payload.issue?.number === "number" &&
-      /bug/i.test(payload.issue.title ?? "")
+      typeof payload.issue?.number === "number"
     ) {
+      const issueTitle = payload.issue.title ?? "";
+      const issueNumber = payload.issue.number;
+      const owner = payload.repository?.owner?.login;
+      const repo = payload.repository?.name;
       const token = repository.github_access_token;
 
-      if (!token) {
-        throw new Error("No GitHub access token saved. Reconnect this repository.");
+      // Query active rules for this repository or globally for this user
+      const { data: configuredRules, error: rulesError } = await supabase
+        .from("automation_rules")
+        .select("id, name, keyword, action_label, notify_slack, enabled")
+        .eq("user_id", repository.user_id)
+        .eq("enabled", true)
+        .or(`repository_id.eq.${repository.id},repository_id.is.null`);
+
+      if (rulesError) {
+        console.warn("Rules query warning:", rulesError.message);
       }
 
-      const owner = payload.repository.owner.login;
-      const repo = payload.repository.name;
-      const issueNumber = payload.issue.number;
+      // Default fallback rule if no custom active rules exist in the database
+      const activeRules: RuleRecord[] =
+        configuredRules && configuredRules.length > 0
+          ? configuredRules
+          : [
+              {
+                name: "Bug Detection",
+                keyword: "bug",
+                action_label: "bug",
+                notify_slack: true,
+                enabled: true,
+              },
+            ];
 
-      // Ensure the bug label exists.
-      const labelUrl = `https://api.github.com/repos/${owner}/${repo}/labels/bug`;
-      const labelCheck = await githubRequest(labelUrl, token);
+      let matchedRuleCount = 0;
 
-      if (labelCheck.status === 404) {
-        const createLabel = await githubRequest(
-          `https://api.github.com/repos/${owner}/${repo}/labels`,
-          token,
-          "POST",
-          { name: "bug", color: "d73a4a", description: "Bug report detected by automation bot" }
-        );
-        if (!createLabel.ok && createLabel.status !== 422) {
-          throw new Error(`Could not create bug label: ${createLabel.status}`);
+      for (const rule of activeRules) {
+        const keyword = rule.keyword.trim();
+        if (!keyword) continue;
+
+        // Check if keyword is matched (case-insensitive)
+        const regex = new RegExp(`\\b${keyword}\\b|${keyword}`, "i");
+        if (!regex.test(issueTitle)) {
+          continue;
         }
-      } else if (!labelCheck.ok) {
-        throw new Error(`Could not check bug label: ${labelCheck.status}`);
-      }
 
-      const labelResponse = await githubRequest(
-        `https://api.github.com/repos/${owner}/${repo}/issues/${issueNumber}/labels`,
-        token,
-        "POST",
-        { labels: ["bug"] }
-      );
+        matchedRuleCount++;
+        overallActionType = "rule_matched";
+        overallMessage = `Matched automation rule '${rule.name}' for issue #${issueNumber}`;
 
-      if (!labelResponse.ok) {
-        throw new Error(`GitHub label operation failed: ${labelResponse.status} ${await labelResponse.text()}`);
-      }
+        // 1. GitHub label action
+        if (rule.action_label && token && owner && repo) {
+          const targetLabel = rule.action_label.trim();
+          try {
+            // Check if label exists, create if not
+            const labelUrl = `https://api.github.com/repos/${owner}/${repo}/labels/${encodeURIComponent(targetLabel)}`;
+            const labelCheck = await githubRequest(labelUrl, token);
 
-      actionType = "bug_label_added";
-      actionMessage = `Automatically added bug label to issue #${issueNumber}`;
+            if (labelCheck.status === 404) {
+              const createLabel = await githubRequest(
+                `https://api.github.com/repos/${owner}/${repo}/labels`,
+                token,
+                "POST",
+                {
+                  name: targetLabel,
+                  color: targetLabel === "bug" ? "d73a4a" : "0366d6",
+                  description: `Label detected by automation rule '${rule.name}'`,
+                }
+              );
+              if (!createLabel.ok && createLabel.status !== 422) {
+                console.warn(`Label create response: ${createLabel.status}`);
+              }
+            }
 
-      if (process.env.SLACK_WEBHOOK_URL) {
-        const slackResponse = await fetch(process.env.SLACK_WEBHOOK_URL, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            text: `🐛 Bug detected in ${repository.full_name}: ${payload.issue.title}\n${payload.issue.html_url}`,
-          }),
-        });
+            const labelResponse = await githubRequest(
+              `https://api.github.com/repos/${owner}/${repo}/issues/${issueNumber}/labels`,
+              token,
+              "POST",
+              { labels: [targetLabel] }
+            );
 
-        if (!slackResponse.ok) {
-          console.error("Slack notification failed:", slackResponse.status);
-        } else {
-          await supabase.from("action_logs").insert({
-            user_id: repository.user_id,
-            event_id: event.id,
-            action_type: "slack_notification",
-            status: "success",
-            message: "Slack notification sent",
-          });
+            if (labelResponse.ok) {
+              await supabase.from("action_logs").insert({
+                user_id: repository.user_id,
+                event_id: event.id,
+                action_type: `${targetLabel}_label_added`,
+                status: "success",
+                message: `Added '${targetLabel}' label to issue #${issueNumber} via rule '${rule.name}'`,
+              });
+            } else {
+              const errText = await labelResponse.text();
+              console.error("GitHub label failed:", labelResponse.status, errText);
+              await supabase.from("action_logs").insert({
+                user_id: repository.user_id,
+                event_id: event.id,
+                action_type: `${targetLabel}_label_failed`,
+                status: "failed",
+                message: `Failed to add '${targetLabel}' label to issue #${issueNumber}: HTTP ${labelResponse.status}`,
+              });
+            }
+          } catch (err) {
+            console.error("Error executing GitHub label action:", err);
+            await supabase.from("action_logs").insert({
+              user_id: repository.user_id,
+              event_id: event.id,
+              action_type: "github_action_failed",
+              status: "failed",
+              message: err instanceof Error ? err.message : "GitHub label action failed",
+            });
+          }
         }
+
+        // 2. Slack notification action
+        if (rule.notify_slack && process.env.SLACK_WEBHOOK_URL) {
+          try {
+            const slackResponse = await fetchWithRetry(process.env.SLACK_WEBHOOK_URL, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                text: `🔔 *${rule.name}* triggered in *${repository.full_name}*\n*Issue:* <${payload.issue.html_url}|#${issueNumber} - ${issueTitle}>`,
+              }),
+            });
+
+            if (slackResponse.ok) {
+              await supabase.from("action_logs").insert({
+                user_id: repository.user_id,
+                event_id: event.id,
+                action_type: "slack_notification",
+                status: "success",
+                message: `Slack notification sent for rule '${rule.name}'`,
+              });
+            } else {
+              const errText = await slackResponse.text();
+              console.error("Slack notification failed:", slackResponse.status, errText);
+              await supabase.from("action_logs").insert({
+                user_id: repository.user_id,
+                event_id: event.id,
+                action_type: "slack_notification",
+                status: "failed",
+                message: `Slack webhook returned HTTP ${slackResponse.status}`,
+              });
+            }
+          } catch (err) {
+            console.error("Error sending Slack notification:", err);
+            await supabase.from("action_logs").insert({
+              user_id: repository.user_id,
+              event_id: event.id,
+              action_type: "slack_notification",
+              status: "failed",
+              message: err instanceof Error ? err.message : "Slack notification failed",
+            });
+          }
+        }
+      }
+
+      if (matchedRuleCount === 0) {
+        overallActionType = "no_rule_matched";
+        overallMessage = `Issue #${issueNumber} opened, but title did not match active rules`;
       }
     }
   } catch (error) {
-    actionStatus = "failed";
-    actionType = "automation_failed";
-    actionMessage = error instanceof Error ? error.message : "Automation failed";
-    console.error("Automation failed:", actionMessage);
+    overallStatus = "failed";
+    overallActionType = "automation_failed";
+    overallMessage = error instanceof Error ? error.message : "Automation failed";
+    console.error("Automation error:", overallMessage);
   }
 
+  // Record main event audit log
   await supabase.from("action_logs").insert({
     user_id: repository.user_id,
     event_id: event.id,
-    action_type: actionType,
-    status: actionStatus,
-    message: actionMessage,
+    action_type: overallActionType,
+    status: overallStatus,
+    message: overallMessage,
   });
 
+  // Update final processing status on the event
   await supabase
     .from("github_events")
-    .update({ processing_status: actionStatus === "success" ? "processed" : "failed" })
+    .update({ processing_status: overallStatus === "success" ? "processed" : "failed" })
     .eq("id", event.id);
 
   return NextResponse.json({
     message: "GitHub event processed",
     event_id: event.id,
     event_type: eventType,
-    action: actionType,
-    status: actionStatus,
+    action: overallActionType,
+    status: overallStatus,
   });
 }

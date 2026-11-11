@@ -15,6 +15,8 @@ The developer made the integration decisions, configured the external services, 
 1. **Next.js and Vercel:** Used Next.js for the authenticated dashboard and server-side webhook endpoint, with Vercel providing a public deployment that GitHub can reach.
 2. **Supabase:** Selected Supabase for GitHub authentication, PostgreSQL persistence and user-scoped data access.
 3. **GitHub webhooks and Slack Incoming Webhooks:** Used GitHub's signed webhook delivery mechanism and Slack Incoming Webhooks to keep the integration simple and suitable for free tiers.
+4. **Dynamic Automation Rules Engine:** Transitioned hardcoded conditions to dynamic Supabase-backed rules evaluated per repository, with fallback to default bug detection.
+5. **Durable Downstream Retries:** Added exponential retry handling for external GitHub and Slack calls to guard against transient network errors.
 
 ## Hardest debugging experience
 
@@ -28,13 +30,16 @@ These experiences reinforced the importance of inspecting actual logs, delivery 
 
 AI helped explain unfamiliar framework concepts, propose implementation steps and generate code. The developer operated the GitHub, Supabase, Slack and Vercel dashboards, configured credentials, ran the application and verified the real integration results.
 
+## Enhancements implemented
+
+- **Configurable automation rules:** Implemented dynamic rule evaluation from Supabase with full dashboard management (create rules with custom keywords, action labels, Slack alerts, and enable/disable toggles).
+- **Durable retries & failure logging:** Added bounded retries for downstream GitHub REST API and Slack Incoming Webhook requests, recording explicit failure action logs to ensure no events or errors are silently lost.
+- **Strict lint & type verification:** Fixed ESLint rules and Next.js client component navigation to ensure zero warnings or errors.
+
 ## Improvements with more time
 
-- Add configurable automation rules with user-defined conditions and actions.
-- Implement durable retries, backoff and recovery for failed GitHub and Slack operations.
-- Improve observability with structured logs and failure details.
-- Encrypt stored GitHub credentials and consider GitHub App installation authentication.
-- Add automated tests for webhook signatures, duplicate deliveries and downstream failures.
+- Encrypt stored GitHub credentials and transition to GitHub App installation authentication.
+- Add automated unit and integration tests for webhook signatures, duplicate deliveries and downstream failure recovery.
 - Add optional AI-based issue summarisation and triage using a free-tier model.
 
 ## AI context files
