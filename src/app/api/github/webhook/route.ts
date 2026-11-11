@@ -74,6 +74,10 @@ interface WebhookPayload {
     number: number;
     title?: string;
     html_url?: string;
+    author_association?: string;
+    user?: {
+      login: string;
+    };
   };
   [key: string]: unknown;
 }
@@ -211,7 +215,7 @@ export async function POST(request: NextRequest) {
         overallActionType = "rule_matched";
         overallMessage = `Matched automation rule '${rule.name}' for issue #${issueNumber}`;
 
-        // 1. GitHub label action
+        // 1. GitHub label action (process goes as usual)
         if (rule.action_label && token && owner && repo) {
           const targetLabel = rule.action_label.trim();
           try {
@@ -273,45 +277,78 @@ export async function POST(request: NextRequest) {
           }
         }
 
-        // 2. Slack notification action
+        // 2. Slack notification action (Collaborator role check)
         if (rule.notify_slack && process.env.SLACK_WEBHOOK_URL) {
-          try {
-            const slackResponse = await fetchWithRetry(process.env.SLACK_WEBHOOK_URL, {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({
-                text: `🔔 *${rule.name}* triggered in *${repository.full_name}*\n*Issue:* <${payload.issue.html_url}|#${issueNumber} - ${issueTitle}>`,
-              }),
-            });
+          const authorAssociation = payload.issue?.author_association ?? "NONE";
+          const authorLogin = payload.issue?.user?.login ?? "unknown";
 
-            if (slackResponse.ok) {
-              await supabase.from("action_logs").insert({
-                user_id: repository.user_id,
-                event_id: event.id,
-                action_type: "slack_notification",
-                status: "success",
-                message: `Slack notification sent for rule '${rule.name}'`,
+          // Validate if author has a collaborator/owner/member role in the repository
+          let isCollaborator = ["COLLABORATOR", "OWNER", "MEMBER"].includes(authorAssociation);
+
+          // If author_association is ambiguous, check GitHub API directly
+          if (!isCollaborator && token && owner && repo && payload.issue?.user?.login) {
+            try {
+              const collabRes = await githubRequest(
+                `https://api.github.com/repos/${owner}/${repo}/collaborators/${encodeURIComponent(authorLogin)}`,
+                token
+              );
+              if (collabRes.status === 204) {
+                isCollaborator = true;
+              }
+            } catch (collabErr) {
+              console.warn("GitHub collaborator API check:", collabErr);
+            }
+          }
+
+          if (!isCollaborator) {
+            // Initiator is NOT a collaborator: return false for Slack event and log audit trail
+            await supabase.from("action_logs").insert({
+              user_id: repository.user_id,
+              event_id: event.id,
+              action_type: "slack_notification_skipped",
+              status: "skipped",
+              message: `Slack alert skipped: issue #${issueNumber} opened by @${authorLogin} (role: ${authorAssociation}), not a collaborator`,
+            });
+          } else {
+            // Initiator IS a collaborator: trigger Slack alert
+            try {
+              const slackResponse = await fetchWithRetry(process.env.SLACK_WEBHOOK_URL, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                  text: `🔔 *${rule.name}* triggered by collaborator *@${authorLogin}* (${authorAssociation}) in *${repository.full_name}*\n*Issue:* <${payload.issue.html_url}|#${issueNumber} - ${issueTitle}>`,
+                }),
               });
-            } else {
-              const errText = await slackResponse.text();
-              console.error("Slack notification failed:", slackResponse.status, errText);
+
+              if (slackResponse.ok) {
+                await supabase.from("action_logs").insert({
+                  user_id: repository.user_id,
+                  event_id: event.id,
+                  action_type: "slack_notification",
+                  status: "success",
+                  message: `Slack notification sent for rule '${rule.name}' (collaborator @${authorLogin})`,
+                });
+              } else {
+                const errText = await slackResponse.text();
+                console.error("Slack notification failed:", slackResponse.status, errText);
+                await supabase.from("action_logs").insert({
+                  user_id: repository.user_id,
+                  event_id: event.id,
+                  action_type: "slack_notification",
+                  status: "failed",
+                  message: `Slack webhook returned HTTP ${slackResponse.status}`,
+                });
+              }
+            } catch (err) {
+              console.error("Error sending Slack notification:", err);
               await supabase.from("action_logs").insert({
                 user_id: repository.user_id,
                 event_id: event.id,
                 action_type: "slack_notification",
                 status: "failed",
-                message: `Slack webhook returned HTTP ${slackResponse.status}`,
+                message: err instanceof Error ? err.message : "Slack notification failed",
               });
             }
-          } catch (err) {
-            console.error("Error sending Slack notification:", err);
-            await supabase.from("action_logs").insert({
-              user_id: repository.user_id,
-              event_id: event.id,
-              action_type: "slack_notification",
-              status: "failed",
-              message: err instanceof Error ? err.message : "Slack notification failed",
-            });
           }
         }
       }
