@@ -282,23 +282,8 @@ export async function POST(request: NextRequest) {
           const authorAssociation = payload.issue?.author_association ?? "NONE";
           const authorLogin = payload.issue?.user?.login ?? "unknown";
 
-          // Validate if author has a collaborator/owner/member role in the repository
-          let isCollaborator = ["COLLABORATOR", "OWNER", "MEMBER"].includes(authorAssociation);
-
-          // If author_association is ambiguous, check GitHub API directly
-          if (!isCollaborator && token && owner && repo && payload.issue?.user?.login) {
-            try {
-              const collabRes = await githubRequest(
-                `https://api.github.com/repos/${owner}/${repo}/collaborators/${encodeURIComponent(authorLogin)}`,
-                token
-              );
-              if (collabRes.status === 204) {
-                isCollaborator = true;
-              }
-            } catch (collabErr) {
-              console.warn("GitHub collaborator API check:", collabErr);
-            }
-          }
+          // Validate strictly that the author has the specific role of COLLABORATOR only (excludes OWNER, MEMBER, etc.)
+          const isCollaborator = authorAssociation === "COLLABORATOR";
 
           if (!isCollaborator) {
             // Initiator is NOT a collaborator: return false for Slack event and log audit trail
